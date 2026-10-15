@@ -17,26 +17,28 @@ const visibleExamples = examples.filter((example) =>
 function ExampleList() {
   const navigation = useNavigation();
   return (
-    <ScrollView contentInsetAdjustmentBehavior="automatic">
-      <View style={styles.exampleGrid}>
-        {visibleExamples.map((example) => (
-          <TouchableOpacity
-            key={example.name}
-            testID={example.name}
-            accessibilityLabel={`${example.name}. ${example.description}`}
-            style={styles.exampleTouchable}
-            onPress={() => {
-              // @ts-expect-error dynamic route names from the examples registry
-              navigation.navigate(example.name);
-            }}
-          >
-            <Text style={styles.exampleName} numberOfLines={2}>
-              {example.name}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-    </ScrollView>
+    <View testID="e2e-screen:Benchmark Examples" style={styles.screen}>
+      <ScrollView contentInsetAdjustmentBehavior="automatic">
+        <View style={styles.exampleGrid}>
+          {visibleExamples.map((example) => (
+            <TouchableOpacity
+              key={example.name}
+              testID={example.name}
+              accessibilityLabel={`${example.name}. ${example.description}`}
+              style={styles.exampleTouchable}
+              onPress={() => {
+                // @ts-expect-error dynamic route names from the examples registry
+                navigation.navigate(example.name);
+              }}
+            >
+              <Text style={styles.exampleName} numberOfLines={2}>
+                {example.name}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+      </ScrollView>
+    </View>
   );
 }
 
@@ -63,6 +65,9 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
+  screen: {
+    flex: 1,
+  },
   exampleGrid: {
     flexDirection: "row",
     flexWrap: "wrap",

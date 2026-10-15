@@ -577,6 +577,57 @@ export function screenTitle(snapshot: ProjectedSnapshot): string | undefined {
   return text?.raw.label;
 }
 
+/** The `<package>:id/` an Android resource id starts with; React Native's `testID` arrives without one. */
+const ANDROID_ID_PACKAGE = /^[\w.]+:id\//;
+
+/**
+ * The screen an app declared: what follows `prefix` in the accessibility
+ * identifier (iOS) or resource id (Android, its `<package>:id/` dropped) of
+ * a node on screen, so an app with no title bar, such as a React Native
+ * screen with its header hidden, still tells its screens apart. A navigator
+ * keeps the screens under the top one mounted, so a hidden node and one
+ * wholly outside the viewport are skipped, and of the rest the last in
+ * document order wins: the screen presented over the others. Undefined when
+ * no node on screen carries the prefix with a value after it.
+ */
+function screenMarker(snapshot: ProjectedSnapshot, prefix: string, viewport: ViewportSize | undefined): string | undefined {
+  let marker: string | undefined;
+  for (const entry of snapshot.index) {
+    const identifier = entry.raw.identifier?.replace(ANDROID_ID_PACKAGE, '');
+    if (identifier === undefined || !identifier.startsWith(prefix)) continue;
+    if (entry.node.states?.hidden === true || !onScreen(entry.raw.rect, viewport)) continue;
+    const value = identifier.slice(prefix.length).trim();
+    if (value !== '') marker = value;
+  }
+  return marker;
+}
+
+/**
+ * The name the snapshot's location gives the visible screen: the marker
+ * `screenIdPrefix` declares when one is on screen, else the title bar's.
+ * `viewport` is the one the observation resolved, for a snapshot without
+ * geometry of its own.
+ */
+export function screenName(
+  snapshot: ProjectedSnapshot,
+  options: { readonly screenIdPrefix?: string | undefined; readonly viewport?: ViewportSize | undefined } = {},
+): string | undefined {
+  const { screenIdPrefix, viewport = snapshot.viewport } = options;
+  const marker = screenIdPrefix === undefined ? undefined : screenMarker(snapshot, screenIdPrefix, viewport);
+  return marker ?? screenTitle(snapshot);
+}
+
+/** Whether a rect overlaps the viewport with some area. Unknown geometry counts. */
+function onScreen(rect: RawNode['rect'], viewport: ViewportSize | undefined): boolean {
+  if (rect === undefined || viewport === undefined) return true;
+  return spans(rect.x, rect.width, viewport.width) && spans(rect.y, rect.height, viewport.height);
+}
+
+/** Whether `[start, start + size)` overlaps `[0, extent)` along one axis. */
+function spans(start: number, size: number, extent: number): boolean {
+  return size > 0 && start < extent && start + size > 0;
+}
+
 /** True when `entry` is a strict descendant of `ancestor`. */
 export function isWithin(entry: ProjectedNode, ancestor: ProjectedNode): boolean {
   for (let current = entry.parent; current !== undefined; current = current.parent) {

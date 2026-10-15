@@ -15,7 +15,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { openScenario, test } from '../tests/fixtures.ts';
+import { expect, openScenario, test } from '../tests/fixtures.ts';
 
 type Platform = 'ios' | 'android';
 
@@ -96,5 +96,24 @@ for (const platform of ['ios', 'android'] as const) {
         write(platform, slug(scenario.name), await settledSnapshot(platform));
       });
     }
+    // Screen identity: the same untitled modal presented twice over a titled
+    // screen, and a tab other than the first, each named by its root view's
+    // `e2e-screen:` testID.
+    test('modal flow sheet, twice', { platforms: [platform] }, async ({ app, device, screen }) => {
+      await openScenario({ app, device, screen }, 'Modal Flow');
+      for (const take of ['a', 'b']) {
+        await screen.getByTestId('open-modal-button').tap();
+        await expect(screen.getByTestId('continue-button')).toBeVisible();
+        write(platform, `modal-flow-sheet-${take}`, await settledSnapshot(platform));
+        await screen.getByTestId('close-modal-button').tap();
+        await expect(screen.getByTestId('open-modal-button')).toBeVisible();
+      }
+    });
+    test('bottom tabs, actions tab', { platforms: [platform] }, async ({ app, device, screen }) => {
+      await openScenario({ app, device, screen }, 'Bottom Tabs');
+      await screen.getByTestId('tab-actions').tap();
+      await expect(screen.getByTestId('complete-action-button')).toBeVisible();
+      write(platform, 'bottom-tabs-actions', await settledSnapshot(platform));
+    });
   });
 }
