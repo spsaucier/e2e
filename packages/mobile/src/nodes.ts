@@ -585,10 +585,10 @@ const ANDROID_ID_PACKAGE = /^[\w.]+:id\//;
  * identifier (iOS) or resource id (Android, its `<package>:id/` dropped) of
  * a node on screen, so an app with no title bar, such as a React Native
  * screen with its header hidden, still tells its screens apart. A navigator
- * keeps the screens under the top one mounted, so a hidden node and one
- * wholly outside the viewport are skipped, and of the rest the last in
- * document order wins: the screen presented over the others. Undefined when
- * no node on screen carries the prefix with a value after it.
+ * may keep screens underneath mounted, so hidden nodes and nodes wholly
+ * outside the viewport are skipped. Of the rest, the last in document order
+ * wins. Undefined when no node on screen carries the prefix with a value
+ * after it.
  */
 function screenMarker(snapshot: ProjectedSnapshot, prefix: string, viewport: ViewportSize): string | undefined {
   let marker: string | undefined;
@@ -619,8 +619,8 @@ export function screenName(
 }
 
 /** Whether a rect overlaps the viewport with some area. Unknown geometry counts. */
-function onScreen(rect: RawNode['rect'], viewport: ViewportSize | undefined): boolean {
-  if (rect === undefined || viewport === undefined) return true;
+function onScreen(rect: RawNode['rect'], viewport: ViewportSize): boolean {
+  if (rect === undefined) return true;
   return spans(rect.x, rect.width, viewport.width) && spans(rect.y, rect.height, viewport.height);
 }
 

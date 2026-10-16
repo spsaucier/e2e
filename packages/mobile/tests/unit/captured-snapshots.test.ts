@@ -170,21 +170,12 @@ describe('screen names from captured root-view markers', () => {
     );
     expect(markers).toHaveLength(2);
     const viewport = projected.viewport ?? { width: 0, height: 0 };
-    expect(
-      markers.every(entry => {
-        const rect = entry.raw.rect;
-        return (
-          entry.node.states?.hidden !== true &&
-          rect !== undefined &&
-          rect.width > 0 &&
-          rect.height > 0 &&
-          rect.x < viewport.width &&
-          rect.x + rect.width > 0 &&
-          rect.y < viewport.height &&
-          rect.y + rect.height > 0
-        );
-      }),
-    ).toBe(true);
-    expect(nameOf(platform, 'layered-markers')).toBe('Cover');
+    const options = { screenIdPrefix: 'e2e-screen:', viewport };
+    expect(screenName(projected, options)).toBe('Cover');
+    const withoutCover = {
+      ...projected,
+      index: projected.index.filter(entry => !entry.raw.identifier?.endsWith('e2e-screen:Cover')),
+    };
+    expect(screenName(withoutCover, options)).toBe('Underlay');
   });
 });
