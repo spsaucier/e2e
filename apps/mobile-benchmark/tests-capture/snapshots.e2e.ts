@@ -117,8 +117,7 @@ for (const platform of ['ios', 'android'] as const) {
     test('layered markers', { platforms: [platform] }, async ({ app, device, screen }) => {
       await app.open();
       await expect(screen.getByTestId('e2e-screen:Benchmark Examples')).toBeVisible();
-      // iOS resolves the path form; Android resolves the host form of this scheme link.
-      await device.openLink(platform === 'ios' ? 'e2e-benchmark:///layers' : 'e2e-benchmark://layers');
+      await device.openLink('e2e-benchmark:///layers');
       // agent-device does not dismiss iOS's first-open scheme confirmation.
       if (platform === 'ios' && (await screen.getByRole('button', 'Open').isVisible())) {
         await screen.getByRole('button', 'Open').tap();

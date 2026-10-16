@@ -65,7 +65,7 @@ export default function App() {
         linking={{
           prefixes: ["e2e-benchmark://"],
           config: { screens: { "Layered Markers": "layers" } },
-          filter: url => url === "e2e-benchmark:///layers" || url === "e2e-benchmark://layers",
+          filter: url => url === "e2e-benchmark:///layers",
         }}
       >
         <Stack.Navigator initialRouteName="Benchmark Examples">
