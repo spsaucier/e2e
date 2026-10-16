@@ -179,7 +179,9 @@ describe('screen names from captured root-view markers', () => {
           rect.width > 0 &&
           rect.height > 0 &&
           rect.x < viewport.width &&
-          rect.y < viewport.height
+          rect.x + rect.width > 0 &&
+          rect.y < viewport.height &&
+          rect.y + rect.height > 0
         );
       }),
     ).toBe(true);
