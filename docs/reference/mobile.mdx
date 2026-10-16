@@ -217,7 +217,7 @@ export default {
 | `validateApp` | Requires `app.bundleId` or `app.appPath` and refuses `app.url` for now, with a note on reaching this machine from the platform's device. A target with either is a `native-app` target, so `requires: ['native-app']` selects device targets. |
 | `session` | `back`, `restart`, and `reset`. No `open`: `app.open()` takes no path and the runner serves it with `restart`, the fresh launch of the pinned app; the agent's `navigate` verb is unavailable, and `device.openLink(url)` opens a deep link or web link. |
 | `artifacts` | Redacted screenshots under `screenshots/NNN-<label>.png`; a screenshot that cannot be redacted fails instead of being written. Video, when the attempt's [video mode](/reference/config#video) records, as `video/video.mp4`, or a device provider's own recording. |
-| `location` | `<bundle id> / <screen title>`, the replay cache's anchor. The title is the navigation bar's identifier on iOS (UIKit and SwiftUI set it to the title), else its label, and the toolbar's label on Android, or the screen marker's value when `screenIdPrefix` is set and a marker is on screen. |
+| `location` | `<bundle id> / <screen title>`, the replay cache's anchor. The title is the navigation bar's on iOS and the toolbar's on Android, or the screen marker's value when `screenIdPrefix` is set and a marker is on screen. |
 | `state` | Not declared. `test.setup` and `session:` are unavailable. |
 
 ## Replay cache on a device

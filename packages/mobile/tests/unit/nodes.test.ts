@@ -560,7 +560,11 @@ describe('snapshot projection', () => {
 describe('screen marker', () => {
   const SCREEN = { x: 0, y: 0, width: 402, height: 874 };
   const PREFIX = 'e2e-screen:';
-  const marked = (snapshot: ReturnType<typeof project>, screenIdPrefix = PREFIX) => screenName(snapshot, { screenIdPrefix });
+  const viewOf = (snapshot: ReturnType<typeof project>): ViewportSize =>
+    snapshot.viewport ?? { width: SCREEN.width, height: SCREEN.height };
+  const titled = (snapshot: ReturnType<typeof project>) => screenName(snapshot, { viewport: viewOf(snapshot) });
+  const marked = (snapshot: ReturnType<typeof project>, screenIdPrefix = PREFIX) =>
+    screenName(snapshot, { screenIdPrefix, viewport: viewOf(snapshot) });
 
   it('reads the screen a React Native testID declares on iOS when no navigation bar names it', () => {
     const projected = project([
@@ -568,7 +572,7 @@ describe('screen marker', () => {
       { ref: 'e2', index: 1, parentIndex: 0, depth: 1, type: 'Other', identifier: 'e2e-screen:Offers', rect: SCREEN },
       { ref: 'e3', index: 2, parentIndex: 1, depth: 2, type: 'StaticText', label: 'Offers', rect: { x: 16, y: 62, width: 80, height: 24 } },
     ]);
-    expect(screenName(projected)).toBeUndefined();
+    expect(titled(projected)).toBeUndefined();
     expect(marked(projected)).toBe('Offers');
   });
 
@@ -592,7 +596,7 @@ describe('screen marker', () => {
       { ref: 'e4', index: 3, parentIndex: 1, depth: 2, type: 'StaticText', label: 'General', rect: { x: 160, y: 40, width: 80, height: 20 } },
       { ref: 'e3', index: 2, parentIndex: 0, depth: 1, type: 'Other', identifier: 'e2e-screen:General Settings', rect: SCREEN },
     ]);
-    expect(screenName(projected)).toBe('General');
+    expect(titled(projected)).toBe('General');
     expect(marked(projected)).toBe('General Settings');
   });
 
@@ -624,8 +628,8 @@ describe('screen marker', () => {
       { ref: 'e3', index: 2, depth: 0, type: 'Other', identifier: 'e2e-screen:Account', rect: { ...SCREEN, x: 402 } },
     ]);
     expect(projected.viewport).toEqual({ width: 804, height: SCREEN.height });
-    expect(screenName(projected)).toBe('General');
-    expect(screenName(projected, { screenIdPrefix: PREFIX })).toBe('Account');
+    expect(titled(projected)).toBe('General');
+    expect(marked(projected)).toBe('Account');
     expect(screenName(projected, { screenIdPrefix: PREFIX, viewport: resolved })).toBe('Offers');
     const offscreenOnly = project([projected.index[0]!.raw, projected.index[1]!.raw, projected.index[3]!.raw]);
     expect(screenName(offscreenOnly, { screenIdPrefix: PREFIX, viewport: resolved })).toBe('General');

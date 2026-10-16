@@ -590,7 +590,7 @@ const ANDROID_ID_PACKAGE = /^[\w.]+:id\//;
  * document order wins: the screen presented over the others. Undefined when
  * no node on screen carries the prefix with a value after it.
  */
-function screenMarker(snapshot: ProjectedSnapshot, prefix: string, viewport: ViewportSize | undefined): string | undefined {
+function screenMarker(snapshot: ProjectedSnapshot, prefix: string, viewport: ViewportSize): string | undefined {
   let marker: string | undefined;
   for (const entry of snapshot.index) {
     const identifier = entry.raw.identifier?.replace(ANDROID_ID_PACKAGE, '');
@@ -605,15 +605,16 @@ function screenMarker(snapshot: ProjectedSnapshot, prefix: string, viewport: Vie
 /**
  * The name the snapshot's location gives the visible screen: the marker
  * `screenIdPrefix` declares when one is on screen, else the title bar's.
- * `viewport` is the one the observation resolved, for a snapshot without
- * geometry of its own.
+ * `viewport` is the one the observation resolved, which can be wider than the
+ * snapshot's own geometry.
  */
 export function screenName(
   snapshot: ProjectedSnapshot,
-  options: { readonly screenIdPrefix?: string | undefined; readonly viewport?: ViewportSize | undefined } = {},
+  options: { readonly screenIdPrefix?: string | undefined; readonly viewport: ViewportSize },
 ): string | undefined {
-  const { screenIdPrefix, viewport = snapshot.viewport } = options;
-  const marker = screenIdPrefix === undefined ? undefined : screenMarker(snapshot, screenIdPrefix, viewport);
+  const marker = options.screenIdPrefix === undefined
+    ? undefined
+    : screenMarker(snapshot, options.screenIdPrefix, options.viewport);
   return marker ?? screenTitle(snapshot);
 }
 

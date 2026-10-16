@@ -59,6 +59,7 @@ const IOS_TITLES: Record<string, string | undefined> = {
   home: 'Benchmark Examples',
   'huge-virtualized-list': 'Huge Virtualized List',
   'infinite-scroll-list': 'Infinite Scroll List',
+  'layered-markers': undefined,
   'login-form': 'Login Form',
   'modal-flow': 'Modal Flow',
   'modal-flow-sheet-a': undefined,
@@ -130,7 +131,7 @@ describe('captured device snapshots', () => {
 describe('screen names from captured root-view markers', () => {
   const nameOf = (platform: string, capture: string) => {
     const { projected } = project(path.join(ROOT, platform, `${capture}.json`));
-    return screenName(projected, { screenIdPrefix: 'e2e-screen:' });
+    return screenName(projected, { screenIdPrefix: 'e2e-screen:', viewport: projected.viewport ?? { width: 0, height: 0 } });
   };
 
   it.each([
@@ -158,5 +159,30 @@ describe('screen names from captured root-view markers', () => {
   it.each(['android', 'ios'])('names the same untitled sheet the same on both presentations, not after the screen under it, on %s', (platform) => {
     expect(nameOf(platform, 'modal-flow-sheet-a')).toBe(nameOf(platform, 'modal-flow-sheet-b'));
     expect(nameOf(platform, 'modal-flow-sheet-a')).not.toBe(nameOf(platform, 'modal-flow'));
+  });
+
+  it.each(['android', 'ios'])('picks the cover from two visible markers in the %s capture', platform => {
+    const file = path.join(ROOT, platform, 'layered-markers.json');
+    const { projected } = project(file);
+    const markers = projected.index.filter(entry => entry.raw.identifier?.includes('e2e-screen:'));
+    expect(markers.map(entry => entry.raw.identifier)).toEqual(
+      expect.arrayContaining([expect.stringContaining('Underlay'), expect.stringContaining('Cover')])
+    );
+    expect(markers).toHaveLength(2);
+    const viewport = projected.viewport ?? { width: 0, height: 0 };
+    expect(
+      markers.every(entry => {
+        const rect = entry.raw.rect;
+        return (
+          entry.node.states?.hidden !== true &&
+          rect !== undefined &&
+          rect.width > 0 &&
+          rect.height > 0 &&
+          rect.x < viewport.width &&
+          rect.y < viewport.height
+        );
+      }),
+    ).toBe(true);
+    expect(nameOf(platform, 'layered-markers')).toBe('Cover');
   });
 });
