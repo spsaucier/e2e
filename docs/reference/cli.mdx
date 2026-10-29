@@ -214,7 +214,13 @@ bunx e2e init my-app --example with-expo
 
 ##### Re-running init
 
-- An existing config is kept, and no packages are added for it.
+- An existing config and existing test files stay byte-for-byte unchanged.
+  The engine and gateway answers apply to a new config only, so their
+  packages are not added. A missing example test is still created, unless
+  per-engine examples exist.
+- `package.json` and `.gitignore` are still updated with what they lack: the
+  `e2e` dev dependency, the `test:e2e` script, and the ignore entries.
+  Existing dependencies, scripts, and entries stay as they are.
 - MCP registration keeps extra settings on the e2e server, such as
   environment variables and client timeouts, even when it repairs the launch
   command. A current registration stays byte-for-byte unchanged.
@@ -833,7 +839,7 @@ bunx e2e explore 'Hunt for broken forms and dead links' --agent thorough --video
 | Option | Description |
 | --- | --- |
 | `[goal]` | What to explore, in a sentence. Default: `Explore the app and find bugs`. |
-| `--config <path>` | Explicit config path, with the errors of `run`. Default: discovered. |
+| `--config <path>` | Explicit config path, with the errors of `run`. Default: discovered. When no config is found and both stdin and stdout are a terminal, the [`e2e init`](#e2e-init) wizard runs in the working directory first. The exploration follows when nothing is left to do by hand: dependencies installed, a model with its key set or its sign-in done, and a web target (it names the URL it explores). Otherwise init ends with the steps left, then the `e2e explore` command as typed. Without a terminal, no config is `CONFIG_NOT_FOUND`. |
 | `--target <id>` | The one target to explore. Default: the first configured target; with several targets and no flag, it explores the first and says so on stderr. An unknown name is `UNKNOWN_TARGET`. |
 | `--agent <name>` | The configured agent to explore as. Default: `default`. Its model, `system`, tools, and context are reused. The built-in agent replaces a hand-rolled `StepExecutor`, with a notice. An entry with no model, a custom executor's included, is `MODEL_UNAVAILABLE` before anything starts. An unknown name is `INVALID_CONFIG`. |
 | `--session <name>` | Starts signed in. The setup test in the config's test files that declares this session runs first. The exploration restores what it saved, as a test with `{ session }` does. No other test runs. A name no setup test declares is `COLLECTION_ERROR`, naming the declared ones, before any app process starts. See [Start signed in](/explore#start-signed-in). |
@@ -889,8 +895,6 @@ finding do (`stuck`).
   before warnings, the most severe first.
 - Each finding has its location, the expected and observed behavior, the
   steps to reproduce, and a screenshot when capture is allowed and succeeds.
-  After a secret fill, findings carry no screenshots; see
-  [screenshots after a secret fill](/reference/security#screenshots-after-a-secret-fill).
 
 ##### Outcomes
 
@@ -1055,12 +1059,13 @@ $ npm install
 ...
 Upgraded: e2e 0.21.2, @e2e-dev/web 0.15.2, @e2e-dev/kernel 0.2.1
 Release notes: https://github.com/tester-army/e2e/releases/tag/e2e%400.21.2
+Updated the agent skill in .agents/skills/e2e/ (12 files)
 ```
 
 | Option | Description |
 | --- | --- |
 | `[version]` | A version such as `0.22.0`, or a dist-tag such as `latest` or `nightly`. Ranges are refused. Default: `latest`. |
-| `--dry-run` | Prints the versions, the new specs, and the install command, and changes nothing. |
+| `--dry-run` | Prints the versions, the new specs, the install command, and the skill copies to update, and changes nothing. |
 
 - **The project.** The nearest `package.json` from the working directory up
   that lists `e2e`.
@@ -1082,8 +1087,10 @@ Release notes: https://github.com/tester-army/e2e/releases/tag/e2e%400.21.2
 - **A failed install.** `package.json` and any lockfile the install changed
   go back as they were. `node_modules` can keep some new versions until the
   next install.
-- **The saved range.** A named version or a prerelease is pinned exactly. A
-  dist-tag keeps the `^` or `~` of the old spec.
+- **The saved range.** Only a package whose installed version changes gets
+  a new spec: a named version or a prerelease is pinned exactly, and a
+  dist-tag keeps the `^` or `~` of the old spec. `e2e upgrade 0.21.3` over
+  an installed 0.21.3 leaves `^0.21.3` as written.
 - **Left alone.** A package linked with `workspace:`, `file:`, `link:`,
   `catalog:`, a path, or a git URL, and an `@e2e-dev/*` package the registry
   doesn't have. When `e2e` itself is linked, the command exits 2.
@@ -1093,8 +1100,12 @@ Release notes: https://github.com/tester-army/e2e/releases/tag/e2e%400.21.2
 - **The registry.** `npm_config_registry` when the package manager sets it,
   else `https://registry.npmjs.org/`.
 - **The agent skill.** A copy in `.agents/skills/e2e` or `.claude/skills/e2e`
-  stays at the old version. The command says so; run `e2e init` to refresh
-  it.
+  is updated to the installed version's after the install, and when
+  everything was already up to date. A `.claude/skills/e2e` symlink to the
+  `.agents/skills` copy follows it. Files the new skill no longer ships stay.
+  A symlink to a copy outside the project isn't written through, and without
+  `node_modules`, as under Yarn Plug'n'Play, the command names `e2e init`
+  instead.
 
 | Exit code | When |
 | --- | --- |
@@ -1160,20 +1171,23 @@ bunx e2e feedback --type feature -m "Need a way to set the viewport per test" --
   registry for the latest e2e release. When yours is older, it exits 2 and
   sends nothing, since the problem may be fixed already. Upgrade with
   [`e2e upgrade`](#e2e-upgrade), check that it still happens, and send it
-  again, or pass `--allow-outdated`.
+  again, or pass `--allow-outdated`. With an opt-out variable set, the
+  command skips this check.
 - **Where it goes.** One `e2e_feedback` event, to the same PostHog project as
   [telemetry](/telemetry#feedback), with the anonymous machine facts every
   telemetry event carries.
 - **Opting out.** Feedback is sent only when you run the command, so a saved
   `e2e telemetry disable` does not stop it. `E2E_TELEMETRY_DISABLED=1` and
-  `DO_NOT_TRACK=1` do: with either set, the command exits 2 and sends
-  nothing. So a CI job or a fleet that opted out sends nothing, even when an
-  agent runs it. `E2E_TELEMETRY_DEBUG=1` prints the event like `--dry-run`.
+  `DO_NOT_TRACK=1` do: with either set, the command sends nothing, and a
+  report it would have sent exits 2. So a CI job or a fleet that opted out
+  sends nothing, even when an agent runs it. `--dry-run`,
+  `E2E_TELEMETRY_DEBUG=1` (prints the event like `--dry-run`), and a bug
+  without `--repro` send nothing anyway, so they exit 0.
 
 | Exit code | When |
 | --- | --- |
 | 0 | PostHog accepted the event, and the command printed a reference id. Also `--dry-run`, `E2E_TELEMETRY_DEBUG=1`, and `--type bug` without `--repro`: none of them send, so they exit 0 even with an opt-out variable set. The outdated-release check runs first, so an outdated install exits 2 on these too, unless `--allow-outdated` or an opt-out variable is set. |
-| 2 | A blank or too long text value, an outdated release without `--allow-outdated`, or `E2E_TELEMETRY_DISABLED=1` or `DO_NOT_TRACK=1` set. |
+| 2 | A blank or too long text value, an outdated release with neither `--allow-outdated` nor an opt-out variable set, or a report that would be sent while `E2E_TELEMETRY_DISABLED=1` or `DO_NOT_TRACK=1` is set. |
 | 3 | PostHog did not confirm the event. The report may still have arrived, so the message names its reference id. |
 
 <Warning>

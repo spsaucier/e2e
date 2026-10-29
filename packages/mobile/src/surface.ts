@@ -49,6 +49,7 @@ import { pointerInteraction, DEFAULT_LONG_PRESS_MS } from './actions.ts';
 import { resolveExpression } from './locate.ts';
 import {
   isWithin,
+  mayTakeText,
   normalizeKind,
   projectSnapshot,
   ROOT_ID,
@@ -130,9 +131,10 @@ export interface OpenAppOptions {
 /**
  * The snapshot fields this engine reads off agent-device's response. `keyboard`
  * is the band the capture's producer measured: `visible` with its frame,
- * `absent`, or that it could not look.
+ * `absent`, or that it could not look. `refsGeneration` is the capture its
+ * refs were issued from.
  */
-type RawSnapshot = Partial<Pick<CaptureSnapshotResult, 'nodes' | 'viewport' | 'truncated' | 'appName' | 'appBundleId' | 'snapshotQuality' | 'keyboard'>>;
+type RawSnapshot = Partial<Pick<CaptureSnapshotResult, 'nodes' | 'viewport' | 'truncated' | 'appName' | 'appBundleId' | 'snapshotQuality' | 'keyboard' | 'refsGeneration'>>;
 
 /** Platform element types that are the soft keyboard or one of its keys, as agent-device names them. */
 const KEYBOARD_TYPES: ReadonlySet<string> = new Set(['keyboard', 'key']);
@@ -158,6 +160,9 @@ function keyboardTop(raw: RawSnapshot, viewport: ViewportSize): number {
   const keys = (raw.nodes ?? []).filter((node) => node.rect !== undefined && KEYBOARD_TYPES.has(normalizeKind(node.type ?? '')));
   return Math.min(viewport.height, ...keys.map((node) => node.rect!.y));
 }
+
+/** One projection and the keyboard state captured with it, kept together across an action. */
+type ProjectedScreen = ProjectedSnapshot & { readonly keyboardVisible: boolean };
 
 /**
  * Whether the capture's producer measured the soft keyboard on screen:
@@ -196,6 +201,11 @@ interface NodeBinding {
   readonly ref: string;
   readonly node: SemanticNode;
   readonly controlRef: string;
+  /** The capture `ref` and `controlRef` came from, pinned on every action so agent-device refuses them once a newer capture supersedes it. */
+  readonly refsGeneration: number | undefined;
+  readonly keyboardVisible: boolean;
+  /** Whether `fill` and `clear` may type into the node, judged with the children `node` leaves out. */
+  readonly takesText: boolean;
 }
 
 
@@ -207,8 +217,8 @@ interface NodeBinding {
  * keeps sliding for about half a second after the action that opened it and
  * a tap aimed from either frame lands on whatever is behind the control.
  * Once the budget has passed the control is found again in a fresh
- * snapshot. Controls that were already on screen at the same place before
- * the action are acted on at once.
+ * snapshot. Unmoved controls are immediate only when keyboard state also
+ * stayed the same; a visible keyboard can precede the app's relayout.
  */
 const DEFAULT_TRANSITION_MS = 500;
 
@@ -388,6 +398,13 @@ function tellHarness(call: () => void): void {
   }
 }
 
+/** The agent-device session a worker drives, and the device agent-device booted for it. */
+export interface BoundDevice {
+  readonly session: string;
+  readonly deviceId: string;
+  readonly deviceName: string;
+}
+
 export class AgentDeviceSurface {
   private client: AgentDeviceClient | undefined;
   private attempt: Attempt | undefined;
@@ -411,6 +428,8 @@ export class AgentDeviceSurface {
   private projectRoot = process.cwd();
   /** The session and device this worker drives, for the error messages whose recovery is per device; set in init. */
   private where: string | undefined;
+  /** The agent-device session this worker drives and the device `init` booted under it. */
+  private bound: BoundDevice | undefined;
   /** How this worker's device records through its provider: set in init when the pool's provider records and the slot rides one of its leases. */
   private leaseRecorder: LeaseRecorder | undefined;
   /**
@@ -428,9 +447,9 @@ export class AgentDeviceSurface {
   /** When this surface last acted on the device (an input or an app launch); the screen may be in transition for a while after. */
   private lastActionAt = 0;
   /** The screen as last projected before that action, to tell controls that were already there from ones that came with it. */
-  private indexBeforeAction: readonly ProjectedNode[] | undefined;
+  private screenBeforeAction: ProjectedScreen | undefined;
   /** The most recent projection of the screen, from any observe or locate. */
-  private latestIndex: readonly ProjectedNode[] | undefined;
+  private latestScreen: ProjectedScreen | undefined;
   /** Budget a control that came with the last action gets to finish arriving; see DEFAULT_TRANSITION_MS. */
   private readonly transitionMs: number;
   /** The identifier prefix of an app-declared screen marker; see `MobileOptions.screenIdPrefix`. */
@@ -476,6 +495,12 @@ export class AgentDeviceSurface {
     return this.attempt !== undefined;
   }
 
+  /** The agent-device session and the device it runs on; INVALID_STATE before init or after dispose. */
+  get boundDevice(): BoundDevice {
+    if (this.bound === undefined) throw invalidState('the agent-device engine is not initialized');
+    return this.bound;
+  }
+
   /** The live client; INVALID_STATE before init or after dispose. */
   requireClient(): AgentDeviceClient {
     if (this.client === undefined) throw invalidState('the agent-device engine is not initialized');
@@ -501,7 +526,7 @@ export class AgentDeviceSurface {
    * not yet arrived.
    */
   async screenCommand<T>(label: string, run: (client: AgentDeviceClient) => Promise<T>, signal: AbortSignal): Promise<T> {
-    const before = this.latestIndex;
+    const before = this.latestScreen;
     const result = await this.command(label, run, signal);
     this.markAction(before);
     return result;
@@ -559,7 +584,8 @@ export class AgentDeviceSurface {
       provider === undefined || lease === undefined
         ? undefined
         : { provider, lease, runId: info.runId, targetName: info.targetName, env: info.env };
-    await this.command('boot', (client) => client.devices.boot(this.selection()), info.signal);
+    const booted = await this.command('boot', (client) => client.devices.boot(this.selection()), info.signal);
+    this.bound = { session, deviceId: booted.id, deviceName: booted.device };
     // Nothing is installed here: a device provider that installed the build
     // from `appPath` says so on the binding, and otherwise the suite installs
     // it where it wants to, with `device.installApp()`.
@@ -725,6 +751,7 @@ export class AgentDeviceSurface {
     const client = this.client;
     const recording = this.recording;
     this.client = undefined;
+    this.bound = undefined;
     this.attempt = undefined;
     this.screenSink = undefined;
     this.generation = new Map();
@@ -997,15 +1024,19 @@ export class AgentDeviceSurface {
    * observation's `viewportFor` checks it against the device before it
    * replaces the known one.
    */
-  private project(raw: RawSnapshot): ProjectedSnapshot {
-    const projected = projectSnapshot(raw.nodes ?? [], {
-      mintId: () => {
-        this.idCounter += 1;
-        return `n${this.idCounter}`;
-      },
-      viewport: raw.viewport,
-    });
-    this.latestIndex = projected.index;
+  private project(raw: RawSnapshot): ProjectedScreen {
+    const projected = {
+      ...projectSnapshot(raw.nodes ?? [], {
+        mintId: () => {
+          this.idCounter += 1;
+          return `n${this.idCounter}`;
+        },
+        viewport: raw.viewport,
+        refsGeneration: raw.refsGeneration,
+      }),
+      keyboardVisible: keyboardShowing(raw),
+    };
+    this.latestScreen = projected;
     const read = projected.viewport;
     if (read !== undefined && (this.knownViewport === undefined || sameScreen(read, this.knownViewport))) this.knownViewport = read;
     return projected;
@@ -1057,7 +1088,7 @@ export class AgentDeviceSurface {
   async observe(operation: OperationContext, options?: EngineObserveOptions): Promise<EngineSnapshot> {
     const raw = await this.snapshotOrEmpty(operation, this.options.snapshot === 'interactive');
     const projected = this.project(raw);
-    this.generation = new Map(projected.index.map((entry) => [entry.id, this.bind(entry, projected.index)]));
+    this.generation = new Map(projected.index.map((entry) => [entry.id, this.bind(entry, projected)]));
     const viewport = await this.viewportFor(projected, operation.signal);
     const location = this.locationOf(raw, projected, viewport);
     const capture = options?.pixels === true ? await this.capturePixels(operation, projected, viewport, { normalizeStatusBar: options.comparable === true }) : undefined;
@@ -1085,7 +1116,7 @@ export class AgentDeviceSurface {
     const projected = this.project(raw);
     this.traceScreen(raw, projected);
     const matches = resolveExpression(expression, projected.index, this.options.platform);
-    for (const entry of matches) this.located.set(entry.id, this.bind(entry, projected.index));
+    for (const entry of matches) this.located.set(entry.id, this.bind(entry, projected));
     for (const oldest of this.located.keys()) {
       if (this.located.size <= MAX_LOCATED_REFS) break;
       this.located.delete(oldest);
@@ -1124,7 +1155,7 @@ export class AgentDeviceSurface {
   private actionTarget(entry: NodeBinding, control = false): { ref: string } {
     const ref = control ? entry.controlRef : entry.ref;
     if (ref === '') throw notActionable(`node ${entry.id} has no agent-device ref to act on`);
-    return { ref: `@${ref}` };
+    return { ref: entry.refsGeneration === undefined ? `@${ref}` : `@${ref}~s${entry.refsGeneration}` };
   }
 
   /**
@@ -1151,10 +1182,35 @@ export class AgentDeviceSurface {
   }
 
   /** Copies the fields actions use and pre-resolves a toggle's inner control. */
-  private bind(entry: ProjectedNode, snapshot: readonly ProjectedNode[]): NodeBinding {
+  private bind(entry: ProjectedNode, snapshot: ProjectedScreen): NodeBinding {
     const { children: _children, ...node } = entry.node;
-    const control = this.controlOf(entry, snapshot);
-    return { id: entry.id, ref: entry.ref, node, controlRef: control.ref };
+    const control = this.controlOf(entry, snapshot.index);
+    return {
+      id: entry.id,
+      ref: entry.ref,
+      node,
+      controlRef: control.ref,
+      keyboardVisible: snapshot.keyboardVisible,
+      takesText: mayTakeText(entry.node),
+      refsGeneration: snapshot.refsGeneration,
+    };
+  }
+
+  /** The same control in the newest capture: the binding itself when it came from that capture, else found there again where it was. */
+  private current(entry: NodeBinding): NodeBinding {
+    const latest = this.latestScreen;
+    if (latest === undefined || entry.refsGeneration === latest.refsGeneration) return entry;
+    const found = this.samePlace(entry, latest.index);
+    if (found === undefined) {
+      throw new EngineError('NODE_STALE', `node ${entry.id} changed since it was located; re-resolve`, { retryable: true });
+    }
+    return this.bind(found, latest);
+  }
+
+  /** The node a binding stands for in a snapshot, when it is still where it was. */
+  private samePlace(entry: NodeBinding, index: readonly ProjectedNode[]): ProjectedNode | undefined {
+    const found = this.refind(entry, index);
+    return found !== undefined && sameRect(found.node.rect, entry.node.rect) ? found : undefined;
   }
 
   /**
@@ -1186,41 +1242,51 @@ export class AgentDeviceSurface {
   }
 
   /**
-   * Lets a control that came with the last action finish arriving before a
-   * test acts on it, and answers the binding to act on. A control already
-   * present at the same place in the snapshot the last action was resolved
-   * from is not in transition and is acted on at once; anything else waits
-   * out the remainder of the transition budget since that action and is then
-   * found again in a fresh snapshot. The budget is the only signal that the
-   * transition is over, since the tree cannot tell a sliding control from a
-   * landed one; the fresh snapshot is where the control landed. Android
-   * reports a window's frames while it slides in, so a ref resolved
-   * mid-flight would send the action where the control was: below the
-   * screen, for a modal rising from the bottom.
+   * Waits for a control that arrived or moved with the last action, returning
+   * whether it waited. Controls already present at the same place need no wait,
+   * unless keyboard state changed: a keyboard change can precede the app's relayout.
    */
-  private async settled(entry: NodeBinding, operation: OperationContext): Promise<NodeBinding> {
+  private async waitForTransition(entry: NodeBinding, operation: OperationContext): Promise<boolean> {
     const since = Date.now() - this.lastActionAt;
     const remaining = this.transitionMs - since;
-    if (remaining <= 0) return entry;
-    const before = this.indexBeforeAction;
-    if (before !== undefined) {
-      const prior = this.refind(entry, before);
-      if (prior !== undefined && sameRect(prior.node.rect, entry.node.rect)) return entry;
-    }
+    if (remaining <= 0) return false;
+    const before = this.screenBeforeAction;
+    if (before !== undefined && before.keyboardVisible === entry.keyboardVisible && this.samePlace(entry, before.index) !== undefined) return false;
     await sleep(remaining, operation.signal);
     // The sleep resolves on abort; the action behind it must not go out once
     // the caller has already been told the operation was cancelled.
     if (operation.signal.aborted) {
       throw new EngineError('CANCELLED', 'transition wait cancelled', { retryable: false });
     }
-    return this.relocated(entry, operation);
+    return true;
   }
 
-  /** The same control in a fresh snapshot; the binding as it was when the snapshot no longer lists it. */
-  private async relocated(entry: NodeBinding, operation: OperationContext): Promise<NodeBinding> {
-    const projected = this.project(await this.snapshotOrEmpty(operation, false));
+  /** Refreshes a control after a transition wait, keeping the binding when no wait was needed. */
+  private async settled(entry: NodeBinding, operation: OperationContext): Promise<NodeBinding> {
+    if (await this.waitForTransition(entry, operation)) return this.relocated(entry, operation);
+    return entry;
+  }
+
+  /**
+   * The same control in a fresh snapshot. A snapshot that no longer lists it
+   * is a retryable NODE_STALE, so the locator resolves again; input mutations
+   * also refuse a truncated snapshot or changed security facts.
+   */
+  private async relocated(entry: NodeBinding, operation: OperationContext, input = false): Promise<NodeBinding> {
+    const raw = await this.snapshotOrEmpty(operation, false);
+    const projected = this.project(raw);
     const found = this.refind(entry, projected.index);
-    return found === undefined ? entry : this.bind(found, projected.index);
+    if (input && (isTruncated(raw) || found === undefined ||
+      entry.node.inputPurpose !== found.node.inputPurpose ||
+      entry.node.states?.disabled !== found.node.states?.disabled ||
+      entry.node.states?.secure !== found.node.states?.secure ||
+      entry.node.states?.hidden !== found.node.states?.hidden)) {
+      throw new EngineError('NODE_STALE', `input node ${entry.id} changed before mutation; observe and authorize it again`, { retryable: true });
+    }
+    if (found === undefined) {
+      throw new EngineError('NODE_STALE', `node ${entry.id} changed during transition; re-resolve`, { retryable: true });
+    }
+    return this.bind(found, projected);
   }
 
   /**
@@ -1228,8 +1294,8 @@ export class AgentDeviceSurface {
    * before it, and when it returned. The transition budget counts from the
    * return, since the input lands late in the command's own round trip.
    */
-  private markAction(before: readonly ProjectedNode[] | undefined): void {
-    this.indexBeforeAction = before;
+  private markAction(before: ProjectedScreen | undefined): void {
+    this.screenBeforeAction = before;
     this.lastActionAt = Date.now();
   }
 
@@ -1250,12 +1316,16 @@ export class AgentDeviceSurface {
     // chrome flow that way. Only the settle wait varies here, by origin.
     if (ref.id === ROOT_ID) {
       if (action.kind !== 'swipe') throw notActionable(`the screen root takes swipe only, not ${action.kind}; act on a node`);
-      const before = this.latestIndex;
+      const before = this.latestScreen;
       await this.command('swipe', (client) => input.send(() => client.interactions.scroll({ direction: action.direction, ...settle })), operation.signal);
       this.markAction(before);
       return;
     }
     const entry = this.resolveRef(ref);
+    const filling = action.kind === 'fill' || action.kind === 'clear';
+    const refuseFill = (binding: NodeBinding): EngineError =>
+      unsupported(`agent-device can only ${action.kind} editable fields; node ${binding.id} is ${binding.node.role ?? 'unknown'}`);
+    if (filling && !entry.takesText) throw refuseFill(entry);
     const label = `perform ${action.kind}`;
     const client = this.requireClient();
     // A toggle already in the wanted state sends nothing, so it neither waits
@@ -1263,9 +1333,16 @@ export class AgentDeviceSurface {
     if ((action.kind === 'check' || action.kind === 'uncheck') && entry.node.states?.checked === (action.kind === 'check')) {
       return;
     }
-    const before = this.latestIndex;
+    const before = this.latestScreen;
     const run = async (): Promise<unknown> => {
-      const target = deterministic ? await this.settled(entry, operation) : entry;
+      let target = entry;
+      if (filling) {
+        if (deterministic) await this.waitForTransition(entry, operation);
+        target = await this.relocated(entry, operation, true);
+        if (!target.takesText) throw refuseFill(target);
+      } else if (deterministic) {
+        target = await this.settled(entry, operation);
+      }
       switch (action.kind) {
         case 'tap':
           return input.send(() => client.interactions.press({ ...this.actionTarget(target, true), ...settle }));
@@ -1311,10 +1388,13 @@ export class AgentDeviceSurface {
           return input.send(() => client.interactions.swipe(swipeWithin(rect, action.direction, action.momentum)));
         }
         case 'dragTo': {
-          const destination = this.resolveRef(action.target);
+          // A test locates the drop target in a capture of its own, after the
+          // source's; agent-device takes both refs from the newest one only.
+          const source = this.current(target);
+          const destination = this.current(this.resolveRef(action.target));
           return input.send(() =>
             client.interactions.drag({
-              source: this.actionTarget(target).ref,
+              source: this.actionTarget(source).ref,
               destination: this.actionTarget(destination).ref,
             }),
           );
@@ -1351,17 +1431,17 @@ export class AgentDeviceSurface {
     if (parsed.modifiers.length > 0) {
       throw unsupported(`agent-device cannot hold ${parsed.modifiers.join('+')} on a device surface; press the key alone`);
     }
-    if (parsed.key.kind === 'named' && parsed.key.name === 'Enter') {
-      return input.send(() => client.command.keyboard({ action: 'enter' }));
+    const enter = parsed.key.kind === 'named' && parsed.key.name === 'Enter';
+    if (!enter && parsed.key.kind === 'named' && parsed.key.name !== 'Space') {
+      throw unsupported(`agent-device cannot press ${parsed.key.name} on a device surface; only Enter, Space, and single characters reach the soft keyboard`);
     }
-    if (parsed.key.kind === 'char' || parsed.key.name === 'Space') {
-      const text = parsed.key.kind === 'char' ? parsed.key.char : ' ';
-      if (entry.node.role === 'textbox' && entry.node.states?.focused !== true) {
-        await input.send(() => client.interactions.press({ ...this.actionTarget(entry), ...settle }));
-      }
-      return input.send(() => client.interactions.type({ text }));
+    // A key reaches the field through the soft keyboard, which is up only
+    // while the field holds focus.
+    if (entry.node.role === 'textbox' && entry.node.states?.focused !== true) {
+      await input.send(() => client.interactions.press({ ...this.actionTarget(entry), ...settle }));
     }
-    throw unsupported(`agent-device cannot press ${parsed.key.name} on a device surface; only Enter, Space, and single characters reach the soft keyboard`);
+    if (enter) return input.send(() => client.command.keyboard({ action: 'enter' }));
+    return input.send(() => client.interactions.type({ text: parsed.key.kind === 'char' ? parsed.key.char : ' ' }));
   }
 
   /**
@@ -1371,7 +1451,7 @@ export class AgentDeviceSurface {
    */
   async performAt(point: ViewportPoint, action: PointerAction, operation: OperationContext, input: InputBudget): Promise<void> {
     const settle = operation.origin === 'test' ? {} : this.settleOptions;
-    const before = this.latestIndex;
+    const before = this.latestScreen;
     const holdMs = action.kind === 'longPress' ? (action.durationMs ?? DEFAULT_LONG_PRESS_MS) : action.kind === 'swipeTo' ? action.durationMs : undefined;
     await this.command(`${action.kind} at point`, (client) => input.send(() => pointerInteraction(client, point, action, settle), holdMs), operation.signal);
     this.markAction(before);
@@ -1387,7 +1467,7 @@ export class AgentDeviceSurface {
     if (options.replace) {
       throw unsupported('agent-device cannot clear the focused field without a node; type into a listed field by id to replace its value');
     }
-    const before = this.latestIndex;
+    const before = this.latestScreen;
     await this.command('keyboard.type', (client) => input.send(() => client.interactions.type({ text })), operation.signal);
     this.markAction(before);
   }
@@ -1407,7 +1487,7 @@ export class AgentDeviceSurface {
     if (parsed.modifiers.length > 0) {
       throw unsupported(`agent-device cannot hold ${parsed.modifiers.join('+')} on a device surface; press the key alone`);
     }
-    const before = this.latestIndex;
+    const before = this.latestScreen;
     if (parsed.key.kind === 'named' && parsed.key.name === 'Enter') {
       await this.command('keyboard.press', (client) => input.send(() => client.command.keyboard({ action: 'enter' })), operation.signal);
     } else if (parsed.key.kind === 'char' || parsed.key.name === 'Space') {
@@ -1428,7 +1508,7 @@ export class AgentDeviceSurface {
    * in {@link dismissKeyboardByGesture}.
    */
   async dismissKeyboard(signal: AbortSignal, input?: InputBudget): Promise<void> {
-    const before = this.latestIndex;
+    const before = this.latestScreen;
     try {
       await this.command('keyboard.dismiss', (client) => sendInput(input, () => client.command.keyboard({ action: 'dismiss' })), signal);
     } catch (cause) {
@@ -1507,7 +1587,7 @@ export class AgentDeviceSurface {
 
   async back(operation: OperationContext, input: InputBudget): Promise<void> {
     const settle = operation.origin === 'test' ? {} : this.settleOptions;
-    const before = this.latestIndex;
+    const before = this.latestScreen;
     await this.command('back', (client) => input.send(() => client.command.back({ ...settle })), operation.signal);
     this.markAction(before);
   }

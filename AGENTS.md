@@ -137,6 +137,13 @@ suites that consume the built packages the way a user would.
   call leaves its tests in and the rest are still judged; after 3 failed
   calls it stops asking. When every call fails, or git or a file read
   fails, it throws, and the run warns and runs every test.
+- `packages/acp` — the published `@e2e-dev/acp` package: a `StepExecutor`
+  (`acp()`, with `claudeCode()` and `codex()` presets) that runs
+  `agent.act` and `agent.assert` on a coding agent over the Agent Client
+  Protocol. The step tools (`createGrammarTools`, `createVerdictTool` from
+  `e2e/agent`) reach the agent as an MCP server on 127.0.0.1; permission
+  requests for anything else are rejected, and a tool of the agent's own
+  that runs without asking fails the step with `POLICY_DENIED`.
 - `packages/github` — the published `@e2e-dev/github` package: the reporter
   that posts the run as one pull request comment from GitHub Actions and
   keeps it current on reruns, writing the same text to the job summary. It
@@ -183,30 +190,27 @@ suites that consume the built packages the way a user would.
   one-screen greeter demo with deterministic and agent tests. They install
   the published packages from npm, sit outside the pnpm workspace, commit no
   lockfile, and gate no pull request; oxlint and fallow ignore them.
-  `.github/workflows/examples.yml` runs every one but `with-limrun` nightly
+  `.github/workflows/examples.yml` runs every one nightly
   (23:00 Europe/Warsaw) on each platform it supports, with the packages
   packed from main swapped in for the npm ones, agent tests included, and
   posts one Slack message for the run (`scripts/examples-nightly/`, the
   `SLACK_EXAMPLES_NIGHTLY_WEBHOOK_URL` secret). A new example or platform
-  gets a matrix entry there. A change still runs the example's suite by hand and updates the
+  gets a matrix entry there. It also needs an official entry in
+  `examples/examples.json` (the list e2e.tester.army/examples renders,
+  partner and community repositories included) and a preset in
+  `packages/e2e/src/cli/init/examples.ts`; `pnpm check:examples` fails
+  without either. A change still runs the example's suite by hand and updates the
   "Last checked" line in its README. A native, Flutter, or .NET MAUI example (SwiftUI, Compose, Kotlin
   Multiplatform, Flutter, .NET MAUI) keeps its tests in an `e2e/` folder
   beside the native project, as a user would.
-- `docs/` (the Mintlify docs site; pages are the `.mdx` files under `docs/`,
-  navigation, theme, and redirects in `docs/docs.json`, extra CSS in
-  `docs/style.css`, the table of contents scroll in
-  `docs/table-of-contents.js`; `docs/examples/` is typechecked and shown
+- `docs/` (the docs pages: the `.mdx` files under `docs/`, navigation,
+  redirects, and the page menu in `docs/docs.json`, the images under
+  `docs/images/`; `docs/examples/` is typechecked and shown
   verbatim on docs pages and in `skills/e2e/` (`docs/examples/skill/`), kept
   in sync by `scripts/check-docs-examples.ts`; a shell
   block that runs `npx` or `npm install`/`ci` sits in a `<CodeGroup>` of
-  `npm`, `pnpm`, and `bun` blocks, which Mintlify syncs site-wide, enforced
-  by `scripts/check-docs-package-managers.ts`; every navigation page but the
-  home page has a social card in `docs/images/og/`, rendered with
-  `@vercel/og` by `docs/og/generate.tsx` (`pnpm docs:og`, also run by
-  `docs:dev`) and committed with the `og:image` frontmatter it writes, since
-  Mintlify runs no build step of ours; `docs:check` fails on a stale card,
-  and a page without one falls back to the brand card `images/og.png` set
-  in `docs.json`).
+  `npm`, `pnpm`, and `bun` blocks, which the site syncs site-wide, enforced
+  by `scripts/check-docs-package-managers.ts`).
   The `e2e` build copies the
   pages to `packages/e2e/docs/` (gitignored,
   `packages/e2e/scripts/prepare-build.ts`) so the published package ships
@@ -536,19 +540,17 @@ trees, on both platforms, without a device.
   model; its `waitFor` and `extract` still use the built-in judgments. No implicit target either: `targets` is required and
   each names its engine.
 - Security invariants (fail closed when one cannot be enforced):
-  - Secrets never reach model input, digests, logs, reports, or artifacts.
-    Model input is the redacted semantic tree (as text or, on request, the
-    redacted node tree), masked pixels only when masking is proven and no
-    secret was filled, and the sanitized prior-step records. Once a secret is
-    filled the viewport stays pixel-tainted for the rest of the attempt. A
-    secret an engine resolves for an option the app sees (basic auth) is
-    protected as text only: redacted everywhere text goes, pixels untouched.
-    One exposure level per session (`SecretExposure` in `run/secrecy.ts`)
-    decides pixels and the taint a saved session carries; text downloads are
+  - Secret values never reach model input, digests, logs, reports, or
+    artifacts as text. Model input is the redacted semantic tree (as text
+    or, on request, the redacted node tree), masked pixels only when masking
+    is proven, and the sanitized prior-step records. Pixels mask secure
+    fields only, before and after a secret fill: a value the app shows
+    elsewhere is in the image, a documented limit (`docs/security.mdx`), not
+    a gap to close with taint or text-matching heuristics. Text downloads are
     rewritten whenever the session's ledger holds a value
-    (`redactsDownloads`), since a plain string reaches the app unseen. What
-    an executor keeps in `attempt.memory` is its own; the harness never
-    reports it.
+    (`redactsDownloads` in `run/secrecy.ts`), since a plain string reaches
+    the app unseen. What an executor keeps in `attempt.memory` is its own;
+    the harness never reports it.
   - An agent's secret fill is authorized by the runner, not the model.
     `typeSecret` (`action-dispatcher.ts`) takes only a handle the step's
     params declare, the target resolves on the newest observation
@@ -565,7 +567,7 @@ trees, on both platforms, without a device.
     next turn is the repair, and refusals count toward the failure-streak
     guard. A node id not on the current screen is `LOCATOR_NOT_FOUND`, an
     action failure the model reads and re-aims from. `POLICY_DENIED` is for
-    denied destinations, forbidden fills, and tainted pixels. Model text is
+    denied destinations, forbidden fills, and withheld pixels. Model text is
     never evaluated as code, selectors, shell, or config. App content, ledger
     text, and pixels are quoted as untrusted evidence with no policy authority.
   - Every navigation a test or the agent asks for (`app.open`,

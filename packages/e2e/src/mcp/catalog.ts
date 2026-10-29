@@ -1,10 +1,11 @@
 /**
  * The catalog of a live session: every tool `call` can run, as AI SDK tools.
  * `observe` shows the whole screen, the grammar is what the target's engine
- * honors, `screenshot` and the point tools (`tap_at`, `hover_at`, `type_at`,
- * `press_at`, `select_at`) among it, answering `PIXEL_TAINTED` once a secret
- * has been filled, `locate` tries a semantic locator the way a test would,
- * `test_lines` returns the test line every action printed (`test-lines.ts`),
+ * honors, `screenshot` and the point tools (`tap_at`, `hover_at`,
+ * `drag_at`, `type_at`, `press_at`, `select_at`) among it, `locate` tries a semantic
+ * locator the way a test would, `run_code` runs whole test statements on
+ * the session's fixtures, `test_lines` returns the test line every action
+ * printed (`test-lines.ts`) and the statements `run_code` passed,
  * `start_recording` and `stop_recording` follow when the engine records video,
  * and the project's own tools come last. The config load refuses a project
  * tool named like a built-in; should one reach here anyway, the built-in
@@ -18,7 +19,7 @@ import { projectTools } from '../agent/default-agent.ts';
 import type { ExecutorNode, StepExecutorContext } from '../agent/executor.ts';
 import { projectTree, redactNode, type NodeRedaction } from '../agent/observation.ts';
 import { GRAMMAR_TOOL_NAMES } from '../agent/action-names.ts';
-import { createGrammarTools } from '../agent/primitives.ts';
+import { grammarTools } from '../agent/primitives.ts';
 import type { ScreenPresenter } from '../agent/screen-update.ts';
 import type { LocatorExpression, SemanticNode, TargetSession } from '../engine/surface.ts';
 import { ConfigurationError } from '../internal/errors.ts';
@@ -27,6 +28,7 @@ import type { LocatorEngine } from '../locator/engine.ts';
 import type { AgentTool, Role } from '../types.ts';
 import { recordingTools, type SessionRecorder } from './recording.ts';
 import { SessionTestLines, type TestLineFills } from './test-lines.ts';
+import { runCodeTool, type RunCodeSession } from './run-code.ts';
 
 /** How many matching nodes `locate` describes. */
 const MAX_LOCATE_NODES = 10;
@@ -44,7 +46,7 @@ export interface SessionCatalog {
   readonly project: ReadonlySet<string>;
   /** The step context the tools run on, keeping every observation for the test lines; the first screen is read through it too. */
   readonly context: StepExecutorContext;
-  /** The test lines the session's actions printed. */
+  /** The test lines the session's actions printed and `run_code` passed. */
   readonly lines: SessionTestLines;
 }
 
@@ -63,9 +65,13 @@ export interface CatalogOptions {
   readonly appBase?: { readonly href: string; readonly origin: string } | undefined;
   /** The credentials and secrets a fill's test line names. */
   readonly fills?: TestLineFills | undefined;
+  /** The test the session ran first, as `file:line`, which its test lines carry on from. */
+  readonly testRan?: string | undefined;
   readonly warn: (message: string) => void;
   /** Told the cause of every grammar action that failed into a result. */
   readonly onActionFailed?: ((cause: unknown) => void) | undefined;
+  /** The attempt's fixtures and what guards them, for `run_code`; without them the catalog has no `run_code`. */
+  readonly runCode?: RunCodeSession | undefined;
 }
 
 /** Builds the session's catalog from the step context and the target. */
@@ -78,16 +84,18 @@ export function createSessionCatalog(options: CatalogOptions): SessionCatalog {
     redact: options.redaction.redact,
     appBase: options.appBase,
     fills: options.fills,
+    testRan: options.testRan,
   });
   const context = lines.watch(options.context);
   // The grammar's own observe reports a diff for the model loop; the
   // session's shows the whole screen, so it replaces the grammar's.
-  const { observe: _diffObserve, ...verbs } = createGrammarTools(context, { screen, onActionFailed: options.onActionFailed });
+  const { observe: _diffObserve, ...verbs } = grammarTools(context, { screen, onActionFailed: options.onActionFailed });
   const recording = options.recorder === undefined ? {} : recordingTools(options.recorder);
   const builtIn: ToolSet = {
     observe: fullObserveTool(context, screen),
     ...lines.wrap(verbs),
     locate: locateTool(locator, options.session, options.redaction),
+    ...(options.runCode === undefined ? {} : { run_code: runCodeTool({ ...options.runCode, context, screen, record: (passed) => lines.ran(passed) }) }),
     test_lines: lines.tool(),
     ...recording,
   };

@@ -3,7 +3,7 @@
 import path from 'node:path';
 import { BUILT_IN_AGENT } from '../agent/agent-brand.ts';
 import { createAgentFixture } from '../agent/index.ts';
-import { prepareObservation } from '../agent/observation.ts';
+import { prepareObservation, type NodeRedaction } from '../agent/observation.ts';
 import type { AgentContext, AgentSelection } from '../agent/invocation.ts';
 import type { ExecutorAttempt, StepExecutor } from '../agent/executor.ts';
 import type { AgentCacheContext } from '../cache/context.ts';
@@ -15,8 +15,9 @@ import type { DebugTrace } from '../internal/debug.ts';
 import { ConfigurationError, errorMessage, InfrastructureError, TestError } from '../internal/errors.ts';
 import { Deadline } from '../internal/time.ts';
 import { didYouMean } from '../internal/suggest.ts';
-import { createScreenshotContext, type WrittenScreenshots } from './screenshots.ts';
-import { resolveSecretValue, sessionSecrecy } from './secrecy.ts';
+import { createScreenshotContext, type ScreenshotContext, type WrittenScreenshots } from './screenshots.ts';
+import { sessionRecordings } from './recordings.ts';
+import { resolveSecretValue, sessionLedger } from './secrecy.ts';
 import { resolveNavigationUrl } from '../internal/urls.ts';
 import { FixtureRecorder } from './fixture-recording.ts';
 import type { AttemptBudget } from './budget.ts';
@@ -30,7 +31,7 @@ import {
 } from '../locator/screen.ts';
 import { engineAppInfo } from '../config/app.ts';
 import type { ResolvedAgentConfig, ResolvedConfig, ResolvedTarget } from '../config/resolve.ts';
-import type { Agent, App, Expectable, SetupSession, TestFixtures } from '../types.ts';
+import type { Agent, App, Expectable, RecordingOptions, SetupSession, TestFixtures } from '../types.ts';
 import type { StepRecord, StepRecorder } from './steps.ts';
 
 export interface ArtifactSink {
@@ -93,41 +94,74 @@ export interface AttemptFixtures {
   readonly agentRuntime: AgentContext;
 }
 
-export function createFixtures(environment: AttemptEnvironment): AttemptFixtures {
+/** What a screen over one engine session is wired to. */
+interface ScreenWiring {
+  /** The engine session the screen drives. */
+  readonly session: TargetSession;
+  readonly budget: AttemptBudget;
+  readonly runId: string;
+  readonly attemptId: string;
+  readonly config: ResolvedConfig;
+  readonly steps: StepRecorder;
+  readonly secrets: SecretResolver;
+  /** The session's secret ledger, which `screen.tree()` passes its text through. */
+  readonly redaction: NodeRedaction;
+  /** The app URL's origin, so the tree shows a link on it by its path. */
+  readonly appOrigin: string | undefined;
+  /** Where `toHaveScreenshot` keeps screenshots; only a test has them. */
+  readonly screenshots?: ScreenshotContext | undefined;
+}
+
+/**
+ * The locator engine and screen context over one engine session, wired to the
+ * attempt's budget, step recorder, timeouts, and secret resolver. The test
+ * fixtures use it, and so does `e2e mcp`'s `run_code` with a session whose
+ * reads pass the secret ledger.
+ */
+export function createScreenContext(wiring: ScreenWiring): ScreenContext {
+  const { config, steps } = wiring;
   const engine = new LocatorEngine({
+    session: wiring.session,
+    budget: wiring.budget,
+    runId: wiring.runId,
+    attemptId: wiring.attemptId,
+    actionTimeout: config.actionTimeout,
+    assertionTimeout: config.assertionTimeout,
+    recordEvent: (event) => steps.recordEvent(event),
+    redact: (text) => steps.redactText(text),
+  });
+  return {
+    engine,
+    steps,
+    secrets: wiring.secrets,
+    projectRoot: config.projectRoot,
+    renderTree: (observation) =>
+      prepareObservation(observation, {
+        redact: wiring.redaction.redact,
+        redactCut: wiring.redaction.redactCut,
+        maxBytes: config.limits.maxObservationBytes,
+        appOrigin: wiring.appOrigin,
+      }).text,
+    ...(wiring.screenshots === undefined ? {} : { screenshots: wiring.screenshots }),
+  };
+}
+
+export function createFixtures(environment: AttemptEnvironment): AttemptFixtures {
+  const ledger = sessionLedger(environment.session, environment.config.allSecrets);
+  const secrets: SecretResolver = {
+    resolve: (secret) => resolveSecretValue(secret, environment.config.allSecrets, ledger),
+  };
+
+  const screenContext = createScreenContext({
     session: environment.session,
     budget: environment.budget,
     runId: environment.runId,
     attemptId: environment.attemptId,
-    actionTimeout: environment.config.actionTimeout,
-    assertionTimeout: environment.config.assertionTimeout,
-    recordEvent: (event) => environment.steps.recordEvent(event),
-    redact: (text) => environment.steps.redactText(text),
-  });
-
-  const { ledger, exposure } = sessionSecrecy(environment.session, environment.config.allSecrets);
-  const secrets: SecretResolver = {
-    async resolve(secret) {
-      const plaintext = await resolveSecretValue(secret, environment.config.allSecrets, ledger);
-      // Only a value that exists can reach the screen: a failed provider
-      // leaves nothing to taint the viewport with.
-      exposure.raise('filled');
-      return plaintext;
-    },
-  };
-
-  const screenContext: ScreenContext = {
-    engine,
+    config: environment.config,
     steps: environment.steps,
     secrets,
-    projectRoot: environment.config.projectRoot,
-    renderTree: (observation) =>
-      prepareObservation(observation, {
-        redact: ledger.redact,
-        redactCut: ledger.redactCut,
-        maxBytes: environment.config.limits.maxObservationBytes,
-        appOrigin: environment.target.app.base?.origin,
-      }).text,
+    redaction: ledger,
+    appOrigin: environment.target.app.base?.origin,
     ...(environment.test === undefined
       ? {}
       : {
@@ -142,7 +176,8 @@ export function createFixtures(environment: AttemptEnvironment): AttemptFixtures
             artifacts: environment.artifacts,
           }),
         }),
-  };
+  });
+  const { engine } = screenContext;
   const screen = createScreen(screenContext);
   const app = createApp(environment, engine);
 
@@ -210,7 +245,6 @@ export function createFixtures(environment: AttemptEnvironment): AttemptFixtures
     secrets,
     redact: ledger.redact,
     redactCut: ledger.redactCut,
-    exposure,
     artifacts: environment.artifacts,
     ...(environment.cache !== undefined ? { cache: environment.cache } : {}),
     ...(environment.debug !== undefined ? { debug: environment.debug } : {}),
@@ -290,7 +324,7 @@ function gateUnknownFixtures<T extends object>(fixtures: T, environment: Attempt
  * Engine-contributed fixtures: factories declare operation metadata
  * through context.fixture and must return the surface they declared. Factories
  * stay lazy and each instance belongs to one test's fixture graph; the
- * session's secrecy state outlives that graph.
+ * session's ledger outlives that graph.
  */
 function contributedFixtures(
   environment: AttemptEnvironment,
@@ -434,6 +468,7 @@ function unreachableApp(cause: unknown, url: string): InfrastructureError | unde
 /** Builds the portable app fixture with the session's shared screenshot policy. */
 function createApp(environment: AttemptEnvironment, engine: LocatorEngine): App {
   const { config, steps, target } = environment;
+  const recordings = sessionRecordings(environment.session, target.name);
 
   /** Opens one resolved URL; a refused connection is reported as the app being down. */
   const openAt = async (resolved: string, timeoutMs: number): Promise<void> => {
@@ -513,6 +548,18 @@ function createApp(environment: AttemptEnvironment, engine: LocatorEngine): App 
         return path.join(environment.artifacts.dir, relative);
       });
     },
+    async startRecording(options?: RecordingOptions): Promise<void> {
+      const name = options?.name;
+      await steps.run('app', 'app.startRecording', typeof name === 'string' ? name : '', async () => {
+        await recordings.startSpan(name, engine.operation());
+      });
+    },
+    stopRecording: () =>
+      steps.run('app', 'app.stopRecording', '', async () => {
+        const { ids, videos } = await recordings.stopSpan(engine.operation(), environment.artifacts);
+        for (const id of ids) environment.steps.attachArtifact(id);
+        return videos;
+      }),
   };
 }
 
